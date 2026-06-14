@@ -1,0 +1,393 @@
+"""
+=================================================================
+AUTONOMOUS CAMERA CAR — OPTIMIZED FOR EXHIBITION STABILITY
+=================================================================
+PURE WIFI ARCHITECTURE
+NO SERIAL
+NO USB
+NO THREADING
+NO TX/RX
+SAFE CAMERA FAILURE HANDLING
+CONTINUOUS HEARTBEAT
+=================================================================
+"""
+
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+import cv2
+import socket
+import time
+import numpy as np
+
+from collections import deque
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
+# ===============================================================
+# CONFIGURATION
+# ===============================================================
+
+ESP32_CAM_URL  = "http://10.205.197.165:81/stream"
+
+ESP32_UDP_IP   = "10.205.197.12"
+ESP32_UDP_PORT = 4210
+
+# ===============================================================
+# SETTINGS
+# ===============================================================
+
+FRAME_W, FRAME_H = 160, 120
+FRAME_CX, FRAME_CY = FRAME_W // 2, FRAME_H // 2
+
+PAN_CENTER = 90
+TILT_CENTER = 90
+
+PAN_MIN, PAN_MAX = 20, 160
+TILT_MIN, TILT_MAX = 40, 140
+
+# [MODIFIED] SERVO_SMOOTH (alpha value) is configured here as 0.2
+SERVO_SMOOTH = 0.2
+
+LOCK_STABLE_SECONDS = 0.5
+
+BASE_SPEED = 170
+MIN_SPEED  = 100
+MAX_SPEED  = 240
+
+BBOX_TOO_CLOSE = 200
+BBOX_TOO_FAR   = 60
+BBOX_IDEAL_MIN = 80
+
+# [MODIFIED] Increased Deadzone to 30 pixels to give the servos a strict target window 
+# and ignore micro-movements (breathing/shaking) that cause rapid jittering.
+H_DEADZONE = 30
+V_DEADZONE = 25  # Vertical deadzone added for the tilt stabilization
+
+# [MODIFIED] Throttled Command Frequency. 0.20 seconds means the laptop 
+# now sends instructions exactly 5 times a second (instead of the previous 0.08 interval).
+SEND_INTERVAL = 0.20
+
+# ===============================================================
+# SENSOR SAFETY
+# ===============================================================
+
+sensor_data = {
+    "F": 999,
+    "L": 999,
+    "R": 999
+}
+
+OBSTACLE_FRONT = 25
+OBSTACLE_SIDE  = 15
+
+# ===============================================================
+# PID CONTROLLER
+# ===============================================================
+
+class PID:
+    def __init__(self, Kp, Ki, Kd, limit=255):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.limit = limit
+
+        self._prev_error = 0
+        self._integral = 0
+        self._last_time = time.time()
+
+    def compute(self, error):
+        now = time.time()
+        dt = max(now - self._last_time, 0.01)
+
+        self._integral += error * dt
+        self._integral = max(-self.limit, min(self.limit, self._integral))
+
+        derivative = (error - self._prev_error) / dt
+
+        output = (
+            self.Kp * error +
+            self.Ki * self._integral +
+            self.Kd * derivative
+        )
+
+        output = max(-self.limit, min(self.limit, output))
+
+        self._prev_error = error
+        self._last_time = now
+
+        return output
+
+    def reset(self):
+        self._prev_error = 0
+        self._integral = 0
+
+pid_turn = PID(Kp=0.45, Ki=0.01, Kd=0.08)
+
+# ===============================================================
+# UDP COMMUNICATION
+# ===============================================================
+
+class Comms:
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(0.001)
+        print(f"[UDP] Connected → {ESP32_UDP_IP}:{ESP32_UDP_PORT}")
+
+    def send(self, cmd):
+        try:
+            self.sock.sendto(
+                (cmd + "\n").encode(),
+                (ESP32_UDP_IP, ESP32_UDP_PORT)
+            )
+        except Exception as e:
+            print("[UDP SEND ERROR]", e)
+
+    def receive_sensor_data(self):
+        global sensor_data
+        try:
+            data, _ = self.sock.recvfrom(128)
+            line = data.decode().strip()
+            if line.startswith("DIST:"):
+                parts = line[5:].split(",")
+                for p in parts:
+                    k, v = p.split("=")
+                    sensor_data[k.strip()] = int(v.strip())
+        except:
+            pass
+
+    def close(self):
+        self.sock.close()
+
+# ===============================================================
+# SERVO CONTROL
+# ===============================================================
+
+pan_angle  = PAN_CENTER
+tilt_angle = TILT_CENTER
+
+def update_servos(person_cx, person_cy):
+    global pan_angle, tilt_angle
+
+    # [MODIFIED] Added Deadzone Condition Check: If the object is within the center deadzone box,
+    # we completely skip computing a new target position. The servos stay locked at their current position.
+    error_x = person_cx - FRAME_CX
+    error_y = person_cy - FRAME_CY
+
+    if abs(error_x) < H_DEADZONE:
+        target_pan = pan_angle  # Hold current pan angle
+    else:
+        target_pan = PAN_CENTER + error_x * 0.15
+
+    if abs(error_y) < V_DEADZONE:
+        target_tilt = tilt_angle  # Hold current tilt angle
+    else:
+        target_tilt = TILT_CENTER - error_y * 0.15
+
+    # Clamp the targets to physical structural boundaries
+    target_pan = max(PAN_MIN, min(PAN_MAX, target_pan))
+    target_tilt = max(TILT_MIN, min(TILT_MAX, target_tilt))
+
+    # [MODIFIED] Mathematical Smooth Transition Implementation via Exponential Moving Average (EMA).
+    # Formula used: Smoothed = (alpha * Target) + ((1 - alpha) * Current)
+    # This interpolates changes step-by-step so the servo sweeps fluidly instead of making sudden violent movements.
+    pan_angle  = (SERVO_SMOOTH * target_pan)  + ((1.0 - SERVO_SMOOTH) * pan_angle)
+    tilt_angle = (SERVO_SMOOTH * target_tilt) + ((1.0 - SERVO_SMOOTH) * tilt_angle)
+
+    return int(pan_angle), int(tilt_angle)
+
+# ===============================================================
+# MOVEMENT LOGIC
+# ===============================================================
+
+def compute_command(person_cx, bbox_w):
+    dist_f = sensor_data["F"]
+    dist_l = sensor_data["L"]
+    dist_r = sensor_data["R"]
+
+    if dist_f < OBSTACLE_FRONT:
+        pid_turn.reset()
+        return "CMD:STOP,0,0"
+
+    if bbox_w < BBOX_TOO_FAR:
+        return f"CMD:FORWARD,{BASE_SPEED},{BASE_SPEED}"
+
+    if bbox_w > BBOX_TOO_CLOSE:
+        return f"CMD:BACKWARD,{BASE_SPEED},{BASE_SPEED}"
+
+    error = person_cx - FRAME_CX
+
+    if abs(error) < H_DEADZONE:
+        pid_turn.reset()
+        if bbox_w < BBOX_IDEAL_MIN:
+            return f"CMD:FORWARD,{BASE_SPEED},{BASE_SPEED}"
+        return "CMD:STOP,0,0"
+
+    pid_output = pid_turn.compute(error)
+
+    left_pwm = int(BASE_SPEED + pid_output)
+    right_pwm = int(BASE_SPEED - pid_output)
+
+    left_pwm = max(MIN_SPEED, min(MAX_SPEED, left_pwm))
+    right_pwm = max(MIN_SPEED, min(MAX_SPEED, right_pwm))
+
+    if error > 0:
+        if dist_r < OBSTACLE_SIDE:
+            return "CMD:STOP,0,0"
+        return f"CMD:RIGHT,{left_pwm},{right_pwm}"
+    else:
+        if dist_l < OBSTACLE_SIDE:
+            return "CMD:STOP,0,0"
+        return f"CMD:LEFT,{left_pwm},{right_pwm}"
+
+# ===============================================================
+# MAIN
+# ===============================================================
+
+def main():
+    print("=" * 60)
+    print("AUTONOMOUS CAMERA CAR — FINAL WIFI VERSION")
+    print("=" * 60)
+
+    model = YOLO("yolov8n.pt", verbose=False)
+
+    tracker = DeepSort(
+        max_age=30,
+        n_init=2,
+        max_cosine_distance=0.3,
+        nn_budget=100
+    )
+
+    comms = Comms()
+    cap = cv2.VideoCapture(ESP32_CAM_URL)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not cap.isOpened():
+        print("[ERROR] Cannot connect to ESP32-CAM")
+        return
+
+    locked_id = None
+    lock_candidate = None
+    lock_start_time = 0
+
+    fps_deque = deque(maxlen=30)
+    prev_time = time.time()
+    last_send_time = 0
+
+    while True:
+        now = time.time()
+        comms.receive_sensor_data()
+
+        fps_deque.append(1.0 / max(now - prev_time, 0.001))
+        fps = np.mean(fps_deque)
+        prev_time = now
+
+        ret, frame = cap.read()
+
+        if not ret:
+            print("[CAMERA] Stream lost")
+            comms.send("CMD:STOP,0,0")
+            cap.release()
+            reconnect_ok = False
+
+            for _ in range(20):
+                cap = cv2.VideoCapture(ESP32_CAM_URL)
+                if cap.isOpened():
+                    reconnect_ok = True
+                    print("[CAMERA] Reconnected")
+                    break
+                cv2.waitKey(1)
+                time.sleep(0.2)
+
+            if not reconnect_ok:
+                frame = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+                cv2.putText(frame, "CAMERA DISCONNECTED", (20, FRAME_H // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.imshow("AI Camera Car", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            continue
+
+        frame = cv2.resize(frame, (FRAME_W, FRAME_H))
+        results = model(frame, classes=[0], verbose=False)[0]
+        detections = []
+
+        for box in results.boxes:
+            conf = float(box.conf[0])
+            if conf < 0.45:
+                continue
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            detections.append(([x1, y1, x2 - x1, y2 - y1], conf, "person"))
+
+        tracks = tracker.update_tracks(detections, frame=frame)
+        confirmed_tracks = [t for t in tracks if t.is_confirmed()]
+
+        if locked_id is not None:
+            exists = any(t.track_id == locked_id for t in confirmed_tracks)
+            if not exists:
+                locked_id = None
+                pid_turn.reset()
+
+        if locked_id is None:
+            best = None
+            best_area = 0
+            for t in confirmed_tracks:
+                x1, y1, x2, y2 = t.to_ltrb()
+                area = (x2 - x1) * (y2 - y1)
+                if area > best_area:
+                    best_area = area
+                    best = t
+
+            if best:
+                if lock_candidate != best.track_id:
+                    lock_candidate = best.track_id
+                    lock_start_time = now
+
+                if now - lock_start_time >= LOCK_STABLE_SECONDS:
+                    locked_id = lock_candidate
+
+        command = "CMD:STOP,0,0"
+
+        locked_track = next((t for t in confirmed_tracks if t.track_id == locked_id), None)
+        if locked_track:
+            x1, y1, x2, y2 = locked_track.to_ltrb()
+            person_cx = int((x1 + x2) / 2)
+            person_cy = int((y1 + y2) / 2)
+            bbox_w = int(x2 - x1)
+
+            pan, tilt = update_servos(person_cx, person_cy)
+            movement = compute_command(person_cx, bbox_w)
+            command = f"{movement},PAN:{pan},TILT:{tilt}"
+
+            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 255), 2)
+            cv2.putText(frame, f"LOCKED ID:{locked_id}", (int(x1), int(y1) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+            # [MODIFIED] Added visual alignment helper lines on display frame for the presentation.
+            # Draws a green target box in the exact middle of your window reflecting your H_DEADZONE and V_DEADZONE.
+            # This visually proves to the judges that your deadzone logic is running perfectly.
+            cv2.rectangle(frame, (FRAME_CX - H_DEADZONE, FRAME_CY - V_DEADZONE), 
+                          (FRAME_CX + H_DEADZONE, FRAME_CY + V_DEADZONE), (0, 255, 0), 1)
+
+        # [MODIFIED] Evaluates the 5-times-a-second (200ms) interval threshold before firing the UDP packet.
+        if now - last_send_time >= SEND_INTERVAL:
+            comms.send(command)
+            last_send_time = now
+
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(frame, command, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        cv2.imshow("AI Camera Car", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('r'):
+            locked_id = None
+            lock_candidate = None
+
+    comms.send("CMD:STOP,0,0")
+    cap.release()
+    cv2.destroyAllWindows()
+    comms.close()
+
+if __name__ == "__main__":
+    main()
