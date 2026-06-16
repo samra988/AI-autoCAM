@@ -1,0 +1,62 @@
+===================================================================
+PROJECT: AI CAMERA CAR / COMPUTER VISION CAMERAMAN
+DOCUMENT: CAMERA VISION, ESP32-CAM SETUP & NETWORK CONFIGURATION
+===================================================================
+
+1. HARDWARE USED FOR VISION
+---------------------------
+For the AI camera system of this project, we are using the "ESP32-CAM" module. 
+It is a low-cost, high-performance development board that combines an ESP32 
+microcontroller with an OV2640 camera sensor. It is responsible for capturing 
+the live video feed and streaming it wirelessly over Wi-Fi.
+
+2. ESP32-CAM FIRMWARE / CODE SOURCE
+-----------------------------------
+The firmware (code) running inside the ESP32-CAM is based on the official production 
+example provided by Espressif within the Arduino IDE.
+
+To find and upload the code, follow these steps in the Arduino IDE:
+Step 1: Open Arduino IDE.
+Step 2: Go to: File -> Examples -> ESP32 -> Camera -> CameraWebServer
+Step 3: In the code configuration tab, uncomment the correct camera model:
+        #define CAMERA_MODEL_AI_THINKER
+Step 4: Enter your local Wi-Fi credentials (SSID and Password) in the code.
+
+3. HARDWARE CONNECTION & UPLOADING PROCEDURE
+--------------------------------------------
+Since the ESP32-CAM module does not have a built-in USB port, you need to use an 
+"MB Shield Converter" (ESP32-CAM-MB USB Programmer Shield) to connect it to the laptop.
+
+Follow this sequence to check the network status:
+Step 1: Plug the ESP32-CAM firmly onto the MB Shield Converter.
+Step 2: Connect the MB Shield to your laptop using a standard Micro-USB wire.
+Step 3: Select the board "AI Thinker ESP32-CAM" and the correct COM Port in Arduino IDE.
+Step 4: Upload the "CameraWebServer" sketch.
+Step 5: Once the upload is successful, open the Serial Monitor by using the shortcut 
+        keys: "Ctrl + Shift + M" (on Windows) or "Cmd + Shift + M" (on Mac).
+Step 6: Set the baud rate to 115200 in the Serial Monitor.
+Step 7: Press the physical "RESET" button on the ESP32-CAM module. This forces the 
+        board to reboot, connect to your Wi-Fi, and print the network status.
+
+4. CRITICAL NETWORK & IP ADDRESS REQUIREMENT
+--------------------------------------------
+- Upon a successful reboot, the ESP32-CAM will output its assigned local IP address 
+  on the Serial Monitor (e.g., http://10.205.197.165/).
+- This specific IP address MUST be 100% correct and matching inside your central 
+  Python tracking script. If the IP address is wrong, outdated, or written incorrectly, 
+  the Python script will fail to establish a handshake, and the camera video stream 
+  will not open.
+
+5. IMPORTANT NOTE ON UDP & INTERNET PROVIDERS
+---------------------------------------------
+- This architecture relies heavily on UDP (User Datagram Protocol) for high-speed, 
+  low-latency communication between the laptop and the car chassis.
+- Please note that local IP subnets and UDP networking routes vary drastically 
+  depending on your Internet Service Provider (ISP), router configuration, or hotspot 
+  network type. 
+- Every time you switch to a different internet provider or different Wi-Fi router, 
+  the router will assign a fresh IP address to both your laptop and your ESP32-CAM. 
+  You must always verify the new IP addresses and update them in the Python code before 
+  running the project.
+
+===================================================================
