@@ -1,6 +1,5 @@
 ===================================================================
-      AI AUTO CAM  (COMPUTER VISION CAMERAMAN)
-                        README DOCUMENT
+                  AI AUTO CAM README DOCUMENT
 ===================================================================
 
 1. PROJECT OVERVIEW
