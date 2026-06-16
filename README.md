@@ -1,5 +1,7 @@
-                  AI AUTO CAM README DOCUMENT
-
+===================================================================
+      AI AUTONOMOUS CAMERA CAR (COMPUTER VISION CAMERAMAN)
+                        README DOCUMENT
+===================================================================
 1. PROJECT OVERVIEW
 -------------------
 This project is an intelligent, autonomous robotic car chassis designed
