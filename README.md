@@ -1,5 +1,5 @@
 ===================================================================
-      AI AUTONOMOUS CAMERA CAR (COMPUTER VISION CAMERAMAN)
+      AI AUTO CAM  (COMPUTER VISION CAMERAMAN)
                         README DOCUMENT
 ===================================================================
 
