@@ -1,0 +1,55 @@
+__________________________________________________________________________________
+| NOTE: For the exact operational pin configuration, consult the esp32_wroom.ino  |
+|__________________________________________________________________________________|
+
+ [BATTERY PACK 1] (Driving Motors & ESP32 Logic)
+  (2x 3.7V Li-ion Cells ~ 7.4V - 8.4V)
+    (+) ------------------------+-------------------> [ L298N 12V Terminal ]
+    (-) --------+               |
+                |               +-------------------> [ ESP32 Vin / 5V Pin ]
+                |
+                +-----------------------------------> [ ESP32 GND ] <--------+
+                |                                                            |
+                +-----------------------------------> [ L298N GND ]          | (Common Ground)
+                                                                             |
+ +---------------------------------------------------------------------------+
+ |
+ |   +-------------+          Control Signals (Logic Reference Line)
+ |   |             |======================================================+
+ |   |    ESP32    |                                                      |
+ |   |  (WROOM)    |---(PWM Logic Pins)---+                               |
+ |   |             |                      |                               |
+ |   +-------------+                      |                               |
+ |          |                             |                               |
+ |          | (GND)                       |                               |
+ |          v                             v                               v
+ |    [ COMMON GND ]               +-------------+                 +--------------+
+ |          ^                      |  MG90s PAN  |                 |  L298N MOTOR |
+ |          |                      | SERVO MOTOR |                 |    DRIVER    |
+ |          | (GND)                +-------------+                 +--------------+
+ |   +-------------+                      ^                        | ENA, IN1,    |
+ |   |  MG90s TILT |                      |                        | IN2, IN3,    |
+ |   | SERVO MOTOR |                      |                        | IN4, ENB     |
+ |   +-------------+                      |                        +--------------+
+ |          ^                             |                          |       |
+ |          | (5V Servo Power)            | (5V Servo Power)         |       |
+ |          +-----------------------------+                          v       v
+ |          |                                                     [LEFT]   [RIGHT]
+ |   +------------------------+                                    PAIR     PAIR
+ |   |     BUCK CONVERTER     |                                   (2x TT)  (2x TT)
+ |   |  (Output: STricly 5V)  |                                   MOTORS   MOTORS
+ |   +------------------------+
+ |          ^            ^
+ |          | (+)        | (-)
+ |   [BATTERY PACK 3]----+ (2x 3.7V Cells Dedicated to Servo Mechanical Loads)
+ |
+ +---> [ ESP32-CAM GND ]
+            ^
+            | (5V or 3.3V Clean Power Output Line)
+     +------------------------+
+     |     BUCK CONVERTER     |
+     | (Output: Cam Config V) |
+     +------------------------+
+            ^            ^
+            | (+)        | (-)
+     [BATTERY PACK 2]----+ (2x 3.7V Cells Dedicated for Isolated Clean Video Stream)
